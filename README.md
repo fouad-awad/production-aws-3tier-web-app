@@ -39,7 +39,7 @@ This solution deploys a production-grade 3-tier web architecture hosting dynamic
 - **Resilient Multi-AZ Compute**: Auto Scaling Group dynamically managing EC2 instances in private subnets across two AZs with automatic health checks and target tracking scaling.
 - **Zero-Bastion Fleet Management**: Administrative access is brokered strictly through AWS Systems Manager (SSM) Session Manager. SSH port 22 is disabled across all security groups, eliminating external attack vectors.
 - **Perimeter Defense & Origin Cloaking**: Amazon CloudFront terminates client TLS and caches content at edge locations. AWS WAF inspects incoming requests against OWASP Top 10 vulnerabilities. The Application Load Balancer (ALB) enforces origin cloaking via the CloudFront Origin-Facing Managed Prefix List, rejecting direct bypass attempts.
-- **Isolated Multi-AZ Data Layer**: Amazon RDS MySQL operates with synchronous replication between primary (`us-east-1b`) and standby (`us-east-1a`) instances. The database resides in isolated subnets with no internet gateways or NAT routes.
+- **Isolated Multi-AZ Data Layer**: Amazon RDS MySQL operates with synchronous replication between primary (`us-east-1a`) and standby (`us-east-1b`) instances. The database resides in isolated subnets with no internet gateways or NAT routes.
 - **Proactive Observability**: Amazon CloudWatch dashboard displays end-to-end metrics (ALB requests, latency, ASG CPU utilization, and RDS health) alongside automated CloudWatch Alarms integrated with Amazon SNS email notifications.
 - **Cost Engineered (<$100 Lab Budget)**: Utilizes a Single-AZ NAT Gateway routing pattern, burstable `t3.micro` and `db.t3.micro` instances, and targeted AWS WAF rule bundles to maximize security while keeping monthly expenditure well within lab constraints.
 
@@ -81,11 +81,11 @@ The architecture implements physical separation between tiers across two Availab
        └────────────────────┬────────────────────┘
                             ▼
                [Private DB Subnets 1a & 1b]
-               Primary RDS MySQL (10.0.22.0/24)
+               Primary RDS MySQL (10.0.21.0/24)
                       │
                       │ Synchronous Replication
                       ▼
-               Standby RDS MySQL (10.0.21.0/24)
+               Standby RDS MySQL (10.0.22.0/24)
 ```
 
 1. **Step 1: DNS Resolution & Edge Probing**: Users resolve `app.production-aws-lab.com` through Amazon Route 53, which uses an Alias A record pointing directly to CloudFront. Simultaneously, Route 53 Global Health Checks probe the endpoint across 8 international locations.
@@ -106,12 +106,12 @@ VPC CIDR: 10.0.0.0/16
 ├── Availability Zone: us-east-1a
 │   ├── public-subnet-1a       : 10.0.1.0/24   (ALB Node 1, Single NAT Gateway)
 │   ├── private-app-subnet-1a  : 10.0.11.0/24  (EC2 App Fleet, No Public IPs)
-│   └── private-db-subnet-1a   : 10.0.21.0/24  (RDS Multi-AZ Standby Replica)
+│   └── private-db-subnet-1a   : 10.0.21.0/24  (RDS Multi-AZ Primary Node)
 │
 └── Availability Zone: us-east-1b
     ├── public-subnet-1b       : 10.0.2.0/24   (ALB Node 2)
     ├── private-app-subnet-1b  : 10.0.12.0/24  (EC2 App Fleet, No Public IPs)
-    └── private-db-subnet-1b   : 10.0.22.0/24  (RDS Multi-AZ Primary Node)
+    └── private-db-subnet-1b   : 10.0.22.0/24  (RDS Multi-AZ Standby Replica)
 ```
 
 ### Subnet Allocation Matrix
@@ -122,8 +122,8 @@ VPC CIDR: 10.0.0.0/16
 | `public-subnet-1b` | `10.0.2.0/24` | `us-east-1b` | `public-rt` | Internet Gateway (`prod-web-igw`) | ALB secondary ingress endpoint for high availability. |
 | `private-app-subnet-1a` | `10.0.11.0/24` | `us-east-1a` | `private-app-rt` | NAT Gateway (`prod-web-nat-1a`) | Private EC2 application tier instances (no public IPs). |
 | `private-app-subnet-1b` | `10.0.12.0/24` | `us-east-1b` | `private-app-rt` | NAT Gateway (`prod-web-nat-1a`) | Private EC2 application tier instances with cross-AZ NAT egress. |
-| `private-db-subnet-1a` | `10.0.21.0/24` | `us-east-1a` | `private-db-rt` | Isolated (No Internet Gateway / NAT) | RDS MySQL Multi-AZ standby replica. |
-| `private-db-subnet-1b` | `10.0.22.0/24` | `us-east-1b` | `private-db-rt` | Isolated (No Internet Gateway / NAT) | RDS MySQL Multi-AZ primary database instance. |
+| `private-db-subnet-1a` | `10.0.21.0/24` | `us-east-1a` | `private-db-rt` | Isolated (No Internet Gateway / NAT) | RDS MySQL Multi-AZ primary database instance. |
+| `private-db-subnet-1b` | `10.0.22.0/24` | `us-east-1b` | `private-db-rt` | Isolated (No Internet Gateway / NAT) | RDS MySQL Multi-AZ standby replica. |
 
 ### Routing Table Design
 
@@ -192,6 +192,8 @@ AWS WAF is attached directly to the Amazon CloudFront distribution, evaluating i
 - **`AWSManagedRulesKnownBadInputsRuleSet`**: Blocks request patterns known to exploit application vulnerabilities or invalid request formats.
 - **`AWSManagedRulesAmazonIpReputationList`**: Intercepts requests from IP addresses associated with botnets and reconnaissance activity.
 
+![AWS WAF Managed Rules Configuration](docs/evidence/16-waf-managed-rules-configuration.png)
+
 ---
 
 ## Compute & Auto Scaling Tier
@@ -219,8 +221,8 @@ The compute layer is engineered for elasticity and high availability.
 - **Database Engine**: Amazon RDS for MySQL (Engine version: `8.4.9`).
 - **Instance Class**: `db.t3.micro` with General Purpose SSD (`gp3`) storage.
 - **Multi-AZ Deployment**: Enabled (`MultiAZ: True`).
-  - **Primary Node**: Deployed in `us-east-1b` handling active read and write operations.
-  - **Standby Replica**: Deployed in `us-east-1a` receiving continuous synchronous replication.
+  - **Primary Node**: Deployed in `us-east-1a` handling active read and write operations.
+  - **Standby Replica**: Deployed in `us-east-1b` receiving continuous synchronous replication.
 - **Automated Failover**: In the event of primary instance failure or AZ degradation, RDS automatically updates DNS records to promote the standby replica to primary with zero manual intervention.
 - **Network Isolation**: Deployed in `prod-web-db-subnet-group` spanning `private-db-subnet-1a` and `private-db-subnet-1b`. `PubliclyAccessible` is set to `false`.
 
@@ -317,6 +319,11 @@ The request is blocked at the edge with an `HTTP/2 403 Forbidden` response from 
 
 ![AWS WAF Layer 7 XSS Interception](docs/evidence/19-waf-xss-interception-403.png)
 
+#### AWS WAF Managed Rule Sets Configuration
+Web ACL `prod-web-waf` configured with active AWS Managed Rule Sets (`AWS-AWSManagedRulesCommonRuleSet`, `AWS-AWSManagedRulesKnownBadInputsRuleSet`, and `AWS-AWSManagedRulesAmazonIPReputationList`) inspecting requests in ascending priority order:
+
+![AWS WAF Managed Rules Configuration](docs/evidence/16-waf-managed-rules-configuration.png)
+
 ---
 
 ### Deliverable 5: ALB Origin Cloaking Verification
@@ -354,7 +361,7 @@ aws rds describe-db-instances \
   --query "DBInstances[0].{Status:DBInstanceStatus, MultiAZ:MultiAZ, PrimaryAZ:AvailabilityZone, SecondaryAZ:SecondaryAvailabilityZone}" \
   --output table
 ```
-CLI output verifies `MultiAZ: True`, Primary node in `us-east-1b`, and Standby replica in `us-east-1a`.
+CLI output verifies `MultiAZ: True`, Primary node in `us-east-1a`, and Standby replica in `us-east-1b`.
 
 ![RDS Multi-AZ CLI Verification](docs/evidence/12-rds-multiaz-cli-verification.png)
 
@@ -422,6 +429,11 @@ CloudFront distribution `prod-web-cf` serving HTTPS traffic globally with AWS WA
 | CloudFront Distribution Security | Live HTTPS App via CloudFront |
 | :---: | :---: |
 | ![CloudFront Config](docs/evidence/17-cloudfront-distribution-waf-attached.png) | ![CloudFront HTTPS](docs/evidence/18-cloudfront-https-app-live.png) |
+
+#### AWS WAF Web ACL & Managed Rule Sets
+AWS WAF Web ACL (`prod-web-waf`) with active AWS Managed Rule Sets inspecting incoming traffic in priority order.
+
+![AWS WAF Managed Rules Configuration](docs/evidence/16-waf-managed-rules-configuration.png)
 
 ---
 

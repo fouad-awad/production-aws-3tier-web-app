@@ -108,7 +108,7 @@ cd production-aws-3tier-web-app
 ```
 
 ### Step 2: Deploy Infrastructure via AWS CloudFormation
-Deploy the core networking, security groups, database, compute fleet, load balancer, and alarms:
+Deploy the core networking, security groups, database, compute fleet, load balancer, edge WAF, health checks, and alarms:
 
 ```bash
 aws cloudformation deploy \
@@ -116,20 +116,20 @@ aws cloudformation deploy \
   --stack-name production-3tier-web-stack \
   --parameter-overrides \
       VpcCIDR=10.0.0.0/16 \
-      DBMasterUsername=admin \
-      DBMasterPassword="YOUR_SECURE_PASSWORD" \
-      NotificationEmail="admin@yourdomain.com" \
+      DBUsername=admin \
+      DBPassword="YOUR_SECURE_PASSWORD" \
+      AlertEmail="admin@yourdomain.com" \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-### Step 3: Configure CloudFront & WAF
+### Step 3: Create the CloudFront Distribution & Attach the Provisioned WAF
 1. Create a CloudFront Distribution pointing to the `ALBDNSName` output from the CloudFormation stack.
-2. Configure AWS WAF with `AWSManagedRulesCommonRuleSet`, `AWSManagedRulesKnownBadInputsRuleSet`, and `AWSManagedRulesAmazonIpReputationList`.
-3. Associate the Web ACL with the CloudFront distribution.
+2. The AWS WAF Web ACL (with `AWSManagedRulesCommonRuleSet`, `AWSManagedRulesKnownBadInputsRuleSet`, and `AWSManagedRulesAmazonIpReputationList`) is created automatically by the stack — retrieve its ARN from the `WebACLArn` stack output.
+3. Associate the Web ACL with the CloudFront distribution by setting the distribution's `WebACLId` property to the `WebACLArn` output value (CloudFront associates WAF via this property rather than a separate association resource).
 
-### Step 4: Configure Route 53 DNS & Health Checks
-1. Create an Alias A record in your Route 53 Hosted Zone pointing `app.production-aws-lab.com` to the CloudFront domain name.
-2. Create a Route 53 Global Health Check targeting `app.production-aws-lab.com` over HTTPS port 443 with a 30-second request interval.
+### Step 4: Configure the Route 53 DNS Alias
+1. In your Route 53 Hosted Zone, create an Alias A record pointing `app.production-aws-lab.com` to the CloudFront distribution's domain name.
+2. The global health check (monitoring the CloudFront domain over HTTPS across 8 regions, 30-second interval) is created automatically by the stack — retrieve its ID from the `Route53HealthCheckId` stack output if you need to reference it (e.g., to attach it to the DNS record's health-check-based routing policy).
 
 *For complete operational validation, testing commands, and teardown steps, consult the [**System Operations & Runbook**](docs/operations.md).*
 

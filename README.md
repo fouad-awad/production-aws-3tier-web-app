@@ -96,6 +96,9 @@ The architecture implements physical separation between tiers across two Availab
 
 ## Quickstart Deployment Guide
 
+> [!NOTE]
+> **Note on Deployment Method**: The live environment referenced throughout this documentation and the Evidence Archive was originally provisioned manually via the AWS Console, then brought under CloudFormation management using AWS's IaC Generator — see `deployment/cloudformation/production-3tier-architecture.generated.yaml` for an authoritative snapshot of the actual deployed resources. A separate, parameterized template (`deployment/cloudformation/production-3tier-architecture.yaml`, used in the steps below) is provided for deploying a fresh instance of this architecture in a new AWS account or region; it has been validated with `cfn-lint` and cross-checked for consistency against the generated template, though it has not yet been deployed end-to-end from a clean environment.
+
 ### Prerequisites
 - AWS Account with Administrator or PowerUser IAM permissions.
 - [AWS CLI v2](https://aws.amazon.com/cli/) installed and configured (`aws configure`).

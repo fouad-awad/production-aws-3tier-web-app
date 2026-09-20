@@ -37,7 +37,8 @@ The compute layer is engineered for elasticity and high availability.
 ## Database Tier (Multi-AZ RDS)
 
 - **Database Engine**: Amazon RDS for MySQL (Engine version: `8.4.9`).
-- **Instance Class**: `db.t3.micro` with General Purpose SSD (`gp3`) storage.
+- **Instance Class**: `db.t3.micro` with General Purpose SSD (`gp2`) storage.
+- **Backup Retention Period**: 1 day of automated daily backups and point-in-time recovery (`BackupRetentionPeriod: 1`).
 - **Multi-AZ Deployment**: Enabled (`MultiAZ: True`).
   - **Primary Node**: Deployed in `us-east-1a` handling active read and write operations.
   - **Standby Replica**: Deployed in `us-east-1b` receiving continuous synchronous replication.

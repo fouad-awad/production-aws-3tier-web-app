@@ -31,6 +31,9 @@ Defense-in-depth is enforced at the DNS, edge, network, host, and database layer
 | **`rds-db-sg`** | RDS Multi-AZ Database | Inbound | TCP | 3306 | `ec2-web-sg` | Allows database connections exclusively from application instances. No public or bastion access. |
 | **`rds-db-sg`** | RDS Multi-AZ Database | Outbound | - | - | None | Database instances cannot initiate outbound external traffic. |
 
+> [!NOTE]
+> The live environment's `ec2-web-sg` currently permits all outbound traffic (`0.0.0.0/0`, all protocols) in addition to the documented MySQL egress to `rds-db-sg`. Restricting outbound rules to only the required destinations (MySQL to the DB tier, HTTPS to package repositories/SSM endpoints) is a recommended tightening for a stricter production security posture and is not yet implemented.
+
 ---
 
 ## 2. Origin Cloaking (CloudFront Shielding)

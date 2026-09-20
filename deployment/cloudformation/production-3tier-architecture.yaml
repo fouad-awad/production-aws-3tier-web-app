@@ -49,6 +49,20 @@ Parameters:
     Type: String
     Default: admin@production-aws-lab.com
     Description: Email address for SNS operational alerts
+  CloudFrontDomainName:
+    Type: String
+    Default: d1topmc0acns1k.cloudfront.net
+    Description: Domain name of the CloudFront distribution for Route 53 edge health checks
+  CloudFrontDistributionArn:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional) ARN of the CloudFront distribution. CloudFront associates with WAF via
+      its WebACLId property rather than AWS::WAFv2::WebACLAssociation.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: pl-3b927c52
+    Description: AWS-managed prefix list ID for CloudFront origin-facing IP ranges in us-east-1
 
 Resources:
   # ============================================================================
@@ -253,13 +267,12 @@ Resources:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: Allow HTTP from CloudFront edge locations
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
-          Description: Inbound HTTP traffic (restricted to CloudFront origin prefix list in production)
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: Inbound HTTPS traffic
+          Description: Allow all outbound traffic
       Tags:
         - Key: Name
           Value: alb-sg
@@ -276,6 +289,10 @@ Resources:
           ToPort: 80
           SourceSecurityGroupId: !Ref ALBSecurityGroup
           Description: Allow HTTP only from ALB security group
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
       Tags:
         - Key: Name
           Value: ec2-web-sg
@@ -295,6 +312,66 @@ Resources:
       Tags:
         - Key: Name
           Value: rds-db-sg
+
+  # ============================================================================
+  # 2.1 EDGE SECURITY (AWS WAFV2 WEB ACL FOR CLOUDFRONT)
+  # Note: CloudFront distributions associate with WAF via the distribution's
+  # WebACLId property, not via AWS::WAFv2::WebACLAssociation (which is only
+  # for Regional resources like ALBs). Must be deployed in us-east-1 for CLOUDFRONT scope.
+  # ============================================================================
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: prod-web-waf
+      Description: Edge WAF for CloudFront distribution
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: prod-web-waf
+      Rules:
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 0
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesCommonRuleSet
+        - Name: AWS-AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesKnownBadInputsRuleSet
+        - Name: AWS-AWSManagedRulesAmazonIpReputationList
+          Priority: 2
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+              RuleActionOverrides:
+                - ActionToUse:
+                    Count: {}
+                  Name: AWSManagedIPDDoSList
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesAmazonIpReputationList
 
   # ============================================================================
   # 3. IAM ROLE FOR BASTIONLESS SYSTEMS MANAGER (SSM) ACCESS
@@ -339,7 +416,7 @@ Resources:
           HttpPutResponseHopLimit: 2
           HttpEndpoint: enabled
         UserData:
-          Fn::Base64: !Sub |
+          Fn::Base64: |
             #!/bin/bash
             yum update -y
             yum install -y httpd php php-mysqlnd curl
@@ -414,10 +491,23 @@ Resources:
     Properties:
       AutoScalingGroupName: !Ref AutoScalingGroup
       PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 300
       TargetTrackingConfiguration:
         PredefinedMetricSpecification:
           PredefinedMetricType: ASGAverageCPUUtilization
         TargetValue: 70.0
+
+  ASGALBRequestScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 300
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${ApplicationLoadBalancer.LoadBalancerFullName}/${WebTargetGroup.TargetGroupFullName}"
+        TargetValue: 1000.0
 
   # ============================================================================
   # 5. LOAD BALANCING (ALB & LISTENERS)
@@ -474,12 +564,43 @@ Resources:
       VPCSecurityGroups:
         - !Ref DBSecurityGroup
       PubliclyAccessible: false
-      StorageType: gp3
-      BackupRetentionPeriod: 7
+      StorageType: gp2
+      StorageEncrypted: true
+      BackupRetentionPeriod: 1
+      DBParameterGroupName: default.mysql8.4
       DeletionProtection: false
       Tags:
         - Key: Name
           Value: prod-web-db
+
+  # ============================================================================
+  # 6.1 EDGE HEALTH MONITORING (ROUTE 53 GLOBAL HEALTH CHECK)
+  # ============================================================================
+  EdgeHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Properties:
+      HealthCheckConfig:
+        Type: HTTPS
+        FullyQualifiedDomainName: !Ref CloudFrontDomainName
+        Port: 443
+        ResourcePath: /
+        RequestInterval: 30
+        FailureThreshold: 3
+        MeasureLatency: false
+        EnableSNI: true
+        Regions:
+          - ap-northeast-1
+          - ap-southeast-1
+          - ap-southeast-2
+          - eu-west-1
+          - sa-east-1
+          - us-east-1
+          - us-west-1
+          - us-west-2
+      HealthCheckTags:
+        - Key: Name
+          Value: prod-edge-health-check
+
 
   # ============================================================================
   # 7. OBSERVABILITY (SNS TOPIC & CLOUDWATCH ALARMS)
@@ -488,6 +609,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: prod-web-alerts-topic
+      DisplayName: ProdAlerts
       Subscription:
         - Endpoint: !Ref AlertEmail
           Protocol: email
@@ -496,7 +618,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: prod-web-alb-high-5xx-errors
-      AlarmDescription: Triggers when ALB or targets encounter 5 or more 5XX errors in 1 minute
+      AlarmDescription: Triggers an alert when the Application Load Balancer (prod-web-alb) generates or receives 5 or more HTTP 5XX server error responses within a 1-minute evaluation period, indicating backend EC2 target failures, unhandled application exceptions, or proxy timeouts.
       Namespace: AWS/ApplicationELB
       MetricName: HTTPCode_ELB_5XX_Count
       Dimensions:
@@ -505,8 +627,10 @@ Resources:
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
+      DatapointsToAlarm: 1
       Threshold: 5
       ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
       AlarmActions:
         - !Ref OperationalAlertsTopic
 
@@ -514,7 +638,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: prod-asg-high-cpu-utilization
-      AlarmDescription: Triggers when ASG average CPU utilization exceeds 70 percent
+      AlarmDescription: Alerts operations via SNS when web-app-asg average CPU utilization breaches 70%.
       Namespace: AWS/EC2
       MetricName: CPUUtilization
       Dimensions:
@@ -522,11 +646,178 @@ Resources:
           Value: !Ref AutoScalingGroup
       Statistic: Average
       Period: 60
-      EvaluationPeriods: 2
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
       Threshold: 70
-      ComparisonOperator: GreaterThanOrEqualToThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: ignore
       AlarmActions:
         - !Ref OperationalAlertsTopic
+
+  AlarmEdgeHealthCheckFailed:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: prod-edge-healthcheck-failed
+      AlarmDescription: Triggers an alert when Route 53 global health checkers report a failed check (HealthCheckStatus < 1) against the CloudFront edge distribution.
+      Namespace: AWS/Route53
+      MetricName: HealthCheckStatus
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref EdgeHealthCheck
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref OperationalAlertsTopic
+
+  OperationalDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: prod-web-operational-dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "alarm",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "properties": {
+                "title": "Production Operational Health Status",
+                "alarms": [
+                  "${AlarmAsgHighCpuUtilization.Arn}",
+                  "${AlarmEdgeHealthCheckFailed.Arn}",
+                  "${AlarmAlbHigh5xxErrors.Arn}"
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 2,
+              "width": 12,
+              "height": 5,
+              "properties": {
+                "metrics": [
+                  [
+                    "AWS/ApplicationELB",
+                    "HTTPCode_Target_2XX_Count",
+                    "LoadBalancer",
+                    "${ApplicationLoadBalancer.LoadBalancerFullName}"
+                  ],
+                  [
+                    ".",
+                    "RequestCount",
+                    ".",
+                    "."
+                  ],
+                  [
+                    ".",
+                    "HTTPCode_ELB_5XX_Count",
+                    ".",
+                    "."
+                  ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "period": 60,
+                "title": "ALB Traffic Throughput & Error Distribution"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 2,
+              "width": 12,
+              "height": 5,
+              "properties": {
+                "metrics": [
+                  [
+                    "AWS/ApplicationELB",
+                    "TargetResponseTime",
+                    "LoadBalancer",
+                    "${ApplicationLoadBalancer.LoadBalancerFullName}",
+                    {
+                      "region": "${AWS::Region}"
+                    }
+                  ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "period": 60,
+                "stat": "Average",
+                "title": "Average Target Response Time (Seconds)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 7,
+              "width": 12,
+              "height": 5,
+              "properties": {
+                "metrics": [
+                  [
+                    "AWS/EC2",
+                    "CPUUtilization",
+                    "AutoScalingGroupName",
+                    "${AutoScalingGroup}",
+                    {
+                      "region": "${AWS::Region}"
+                    }
+                  ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "period": 60,
+                "stat": "Average",
+                "title": "ASG Cluster Average CPU Utilization (%)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 5,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  [
+                    "AWS/RDS",
+                    "CPUUtilization",
+                    "DBInstanceIdentifier",
+                    "${DatabaseInstance}",
+                    {
+                      "period": 60
+                    }
+                  ],
+                  [
+                    ".",
+                    "DatabaseConnections",
+                    ".",
+                    ".",
+                    {
+                      "period": 60
+                    }
+                  ]
+                ],
+                "region": "${AWS::Region}",
+                "title": "RDS DB CPU & Connection Pool"
+              }
+            }
+          ]
+        }
 
 Outputs:
   VpcId:
@@ -541,3 +832,18 @@ Outputs:
   SNSTopicArn:
     Description: ARN of the operational alert SNS topic
     Value: !Ref OperationalAlertsTopic
+  WebACLArn:
+    Description: ARN of the CloudFront WAF WebACL
+    Value: !GetAtt WebACL.Arn
+  WebACLId:
+    Description: ID of the CloudFront WAF WebACL
+    Value: !Ref WebACL
+  DashboardName:
+    Description: CloudWatch Operational Dashboard Name
+    Value: !Ref OperationalDashboard
+  Route53HealthCheckId:
+    Description: Route 53 Edge Health Check ID
+    Value: !Ref EdgeHealthCheck
+  CloudFrontDistributionArn:
+    Description: Associated CloudFront Distribution ARN
+    Value: !Ref CloudFrontDistributionArn

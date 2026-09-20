@@ -6,9 +6,11 @@
 [![CDN](https://img.shields.io/badge/CDN-Amazon_CloudFront-8C4FFF?logo=amazon-aws&logoColor=white)](docs/security.md#2-origin-cloaking-cloudfront-shielding)
 [![Database](https://img.shields.io/badge/Database-Amazon_RDS_MySQL_Multi--AZ-527FFF?logo=mysql&logoColor=white)](docs/operations.md#database-tier-multi-az-rds)
 [![Cost-Engineered](https://img.shields.io/badge/Cost_Budget-<$100%2Fmonth-brightgreen?logo=circleci&logoColor=white)](docs/operations.md#cost-optimization-strategy-100-budget)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 An enterprise-ready, cost-engineered 3-tier web architecture deployed in AWS using AWS CloudFormation. This production blueprint demonstrates end-to-end defense-in-depth, Multi-AZ resilience across compute and database tiers, zero-bastion fleet management via AWS Systems Manager, origin cloaking, and observability with Amazon CloudWatch and SNS.
+
+> 🔴 **Live Demo**: [https://d1topmc0acns1k.cloudfront.net/](https://d1topmc0acns1k.cloudfront.net/) — the deployed application, live. *(Note: the custom domain `app.production-aws-lab.com` is fully configured via Route 53 alias but not yet publicly resolvable, as the domain has not been purchased — use the CloudFront URL above to access the live app).*
 
 ---
 
@@ -49,7 +51,9 @@ The architecture implements physical separation between tiers across two Availab
 ### End-to-End Traffic Walkthrough
 
 ```text
-       │
+[Client / Users]
+       │ (1) DNS Resolution & Global Edge Health Checks
+       ▼
 [Amazon Route 53] (app.production-aws-lab.com -> CloudFront Alias)
        │
        ▼
@@ -147,4 +151,4 @@ This solution was engineered as a high-fidelity, cost-constrained MVP (<$100/mon
 
 ## License
 
-This project is open-source and licensed under the [MIT License](LICENSE).
+This project is open-source and licensed under the [Apache 2.0 License](LICENSE).
